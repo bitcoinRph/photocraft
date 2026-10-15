@@ -1,0 +1,16 @@
+#!/bin/sh
+# Serve PhotoCraft's stdio MCP server over Streamable HTTP inside the container.
+# StartOS gates the port with a bearer token at its reverse proxy
+# (startos/interfaces.ts), so the proxy binds every address and checks nothing.
+#
+# mcp-proxy starts one photocraft-cli process and keeps it for its whole life,
+# so the engine session (open documents, history) survives across tool calls
+# and across client sessions. All agents share that one session, like one
+# desktop app: an agent works on the documents it opened, selected by index.
+set -eu
+exec mcp-proxy \
+  --host 0.0.0.0 \
+  --port 8082 \
+  -- photocraft-cli mcp \
+  --automation-read-root /data/workspace \
+  --automation-write-root /data/workspace

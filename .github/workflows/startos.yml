@@ -1,0 +1,107 @@
+name: StartOS package
+
+# Builds the .s9pk in deploy/startos with Start9's own build environment
+# (https://docs.start9.com/packaging). A push of a `startos/v*` tag also
+# publishes the packages as a GitHub release.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'deploy/startos/**'
+      - '.github/workflows/startos.yml'
+  push:
+    tags: ['startos/v*']
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the ${{ matrix.target }} package
+    defaults:
+      run:
+        working-directory: deploy/startos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86
+            runner: ubuntu-latest
+          - target: arm
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up the StartOS build environment
+        uses: Start9Labs/start-technologies/.github/actions/setup-build-env@master
+
+      # Both images compile PhotoCraft from source; the runner needs its disk.
+      - name: Free disk space
+        uses: Start9Labs/start-technologies/.github/actions/free-disk-space@master
+
+      - name: Provision a workspace signing key
+        run: |
+          start-cli init-key
+          mkdir -p ../../.startos
+          cp ~/.startos/id.key.pem ../../.startos/build.key.pem
+
+      - name: Install the package's dependencies
+        run: npm ci
+
+      - name: Build the ${{ matrix.target }} package
+        run: make ${{ matrix.target }}
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: photocraft_${{ matrix.target }}
+          path: deploy/startos/*.s9pk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  release:
+    name: Publish the packages to a GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/startos/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Download the built packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: photocraft_*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksum the packages
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          sha256sum ./*.s9pk > checksums.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          title="PhotoCraft for StartOS ${TAG#startos/}"
+          notes="Sideload the .s9pk for your server on StartOS: photocraft_x86_64.s9pk for Intel/AMD, photocraft_aarch64.s9pk for ARM. Verify with 'sha256sum -c checksums.txt --ignore-missing'. Setup: deploy/startos/instructions.md."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$title" --notes "$notes"
+          else
+            gh release create "$TAG" --title "$title" --notes "$notes"
+          fi
+          gh release upload "$TAG" dist/*.s9pk dist/checksums.txt --clobber

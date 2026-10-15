@@ -16,3 +16,9 @@ book/output
 **/.env
 **/.env.*
 *.log
+# StartOS package build outputs (deploy/startos); the Dockerfiles there use the repository root as context
+deploy/startos/node_modules
+deploy/startos/javascript
+deploy/startos/ncc-cache
+deploy/startos/docker-images
+deploy/startos/*.s9pk

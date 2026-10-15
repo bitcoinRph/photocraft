@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Command-line client for PhotoCraft on StartOS.
+
+Moves files through the file exchange and calls the MCP endpoint, with only
+the Python standard library. Every setting comes from the environment or a
+flag (flags win):
+
+  PHOTOCRAFT_MCP_URL        https://<host>:<port>/mcp   (Interfaces tab: MCP Endpoint)
+  PHOTOCRAFT_MCP_TOKEN      the bearer token           (Set Agent Credentials)
+  PHOTOCRAFT_FILES_URL      https://<host>:<port>/     (Interfaces tab: File Exchange)
+  PHOTOCRAFT_FILES_PASSWORD the file exchange password (Set Agent Credentials)
+  PHOTOCRAFT_FILES_USER     the file exchange user (default: photocraft)
+  PHOTOCRAFT_CA             the StartOS root CA file, for a .local address
+
+Commands:
+  ls [DIR]            list a workspace directory
+  put LOCAL [REMOTE]  upload a file into the workspace
+  get REMOTE [LOCAL]  download a file from the workspace
+  rm REMOTE           delete a file
+  mkdir DIR           create a directory
+  tools               list the MCP tools
+  commands [FILTER]   list the engine commands (optionally filtered)
+  call TOOL [JSON]    call an MCP tool with JSON arguments
+  run ID [JSON]       run an engine command: call command_run {"id": ID, "params": JSON}
+  preview OUT.png     render the active document to a PNG file
+
+Workspace paths are relative to the workspace root, for the file exchange and
+for the MCP tools alike. Reach an onion address through Tor with torsocks.
+"""
+
+import argparse
+import base64
+import json
+import os
+import posixpath
+import ssl
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+PROTOCOL_VERSION = "2025-06-18"
+
+
+def fail(message):
+    print(f"photocraft-remote: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+class Http:
+    def __init__(self, ca, insecure):
+        context = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
+        if insecure:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        self.opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+
+    def request(self, method, url, headers=None, data=None):
+        request = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+        try:
+            with self.opener.open(request, timeout=600) as response:
+                return response.status, dict(response.headers), response.read()
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", "replace")
+            fail(f"{method} {url} -> HTTP {error.code}: {body[:500]}")
+        except urllib.error.URLError as error:
+            fail(f"{method} {url}: {error.reason}")
+
+
+class Files:
+    def __init__(self, http, base, user, password):
+        if not base:
+            fail("set PHOTOCRAFT_FILES_URL or --files")
+        if not password:
+            fail("set PHOTOCRAFT_FILES_PASSWORD or --password")
+        self.http = http
+        self.base = base.rstrip("/") + "/"
+        credential = base64.b64encode(f"{user}:{password}".encode()).decode()
+        self.headers = {"Authorization": f"Basic {credential}"}
+
+    def url(self, path, listing=False):
+        path = posixpath.normpath("/" + path).lstrip("/")
+        prefix = ".json/" if listing else ""
+        return self.base + prefix + urllib.parse.quote(path)
+
+    def ls(self, directory):
+        url = self.url(directory, listing=True)
+        if not url.endswith("/"):
+            url += "/"
+        _, _, body = self.http.request("GET", url, self.headers)
+        for entry in json.loads(body):
+            size = "" if entry["type"] == "directory" else str(entry.get("size", ""))
+            suffix = "/" if entry["type"] == "directory" else ""
+            print(f"{size:>12}  {entry['mtime']}  {entry['name']}{suffix}")
+
+    def put(self, local, remote):
+        with open(local, "rb") as handle:
+            data = handle.read()
+        self.http.request("PUT", self.url(remote), self.headers, data)
+        print(f"uploaded {local} -> {remote} ({len(data)} bytes)")
+
+    def get(self, remote, local):
+        _, _, body = self.http.request("GET", self.url(remote), self.headers)
+        with open(local, "wb") as handle:
+            handle.write(body)
+        print(f"downloaded {remote} -> {local} ({len(body)} bytes)")
+
+    def rm(self, remote):
+        self.http.request("DELETE", self.url(remote), self.headers)
+        print(f"deleted {remote}")
+
+    def mkdir(self, remote):
+        self.http.request("MKCOL", self.url(remote) + "/", self.headers)
+        print(f"created {remote}/")
+
+
+class Mcp:
+    """A minimal MCP client over Streamable HTTP (one session per run)."""
+
+    def __init__(self, http, url, token):
+        if not url:
+            fail("set PHOTOCRAFT_MCP_URL or --mcp")
+        if not token:
+            fail("set PHOTOCRAFT_MCP_TOKEN or --token")
+        self.http = http
+        self.url = url
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        self.next_id = 1
+        result = self.send("initialize", {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "photocraft-remote", "version": "1"},
+        })
+        self.headers["MCP-Protocol-Version"] = result.get("protocolVersion", PROTOCOL_VERSION)
+        self.notify("notifications/initialized")
+
+    def post(self, message):
+        data = json.dumps(message).encode()
+        status, headers, body = self.http.request("POST", self.url, self.headers, data)
+        session = {k.lower(): v for k, v in headers.items()}.get("mcp-session-id")
+        if session:
+            self.headers["Mcp-Session-Id"] = session
+        return status, headers, body
+
+    def notify(self, method, params=None):
+        self.post({"jsonrpc": "2.0", "method": method, "params": params or {}})
+
+    def send(self, method, params):
+        message_id = self.next_id
+        self.next_id += 1
+        _, headers, body = self.post({"jsonrpc": "2.0", "id": message_id, "method": method, "params": params})
+        content_type = {k.lower(): v for k, v in headers.items()}.get("content-type", "")
+        for message in parse_messages(body, content_type):
+            if message.get("id") == message_id:
+                if "error" in message:
+                    fail(f"{method}: {json.dumps(message['error'])}")
+                return message.get("result", {})
+        fail(f"{method}: no response with id {message_id}")
+
+    def call(self, tool, arguments):
+        result = self.send("tools/call", {"name": tool, "arguments": arguments})
+        if result.get("isError"):
+            fail(f"tool {tool} failed: {content_text(result)}")
+        return result
+
+
+def parse_messages(body, content_type):
+    text = body.decode("utf-8")
+    if "text/event-stream" in content_type:
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                yield json.loads(line[5:].strip())
+        return
+    if text.strip():
+        parsed = json.loads(text)
+        yield from parsed if isinstance(parsed, list) else [parsed]
+
+
+def content_text(result):
+    return "\n".join(item.get("text", "") for item in result.get("content", []) if item.get("type") == "text")
+
+
+def print_result(result):
+    for item in result.get("content", []):
+        if item.get("type") == "text":
+            try:
+                print(json.dumps(json.loads(item["text"]), indent=2))
+            except ValueError:
+                print(item["text"])
+        else:
+            print(f"[{item.get('type')} content]")
+
+
+def json_arg(text):
+    if not text:
+        return {}
+    try:
+        value = json.loads(text)
+    except ValueError as error:
+        fail(f"invalid JSON argument: {error}")
+    if not isinstance(value, dict):
+        fail("the JSON argument must be an object")
+    return value
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    env = os.environ.get
+    parser.add_argument("--mcp", default=env("PHOTOCRAFT_MCP_URL"), help="MCP endpoint URL")
+    parser.add_argument("--token", default=env("PHOTOCRAFT_MCP_TOKEN"), help="MCP bearer token")
+    parser.add_argument("--files", default=env("PHOTOCRAFT_FILES_URL"), help="file exchange URL")
+    parser.add_argument("--user", default=env("PHOTOCRAFT_FILES_USER", "photocraft"), help="file exchange user")
+    parser.add_argument("--password", default=env("PHOTOCRAFT_FILES_PASSWORD"), help="file exchange password")
+    parser.add_argument("--ca", default=env("PHOTOCRAFT_CA"), help="CA certificate file (the StartOS root CA)")
+    parser.add_argument("--insecure", action="store_true", help="do not verify the server certificate")
+    parser.add_argument("command")
+    parser.add_argument("args", nargs="*")
+    options = parser.parse_args()
+    http = Http(options.ca, options.insecure)
+    command, args = options.command, options.args
+
+    def arg(index, default=None):
+        if index < len(args):
+            return args[index]
+        if default is None:
+            fail(f"{command}: missing argument")
+        return default
+
+    if command in ("ls", "put", "get", "rm", "mkdir"):
+        files = Files(http, options.files, options.user, options.password)
+        if command == "ls":
+            files.ls(arg(0, ""))
+        elif command == "put":
+            files.put(arg(0), arg(1, os.path.basename(arg(0))))
+        elif command == "get":
+            files.get(arg(0), arg(1, os.path.basename(arg(0))))
+        elif command == "rm":
+            files.rm(arg(0))
+        else:
+            files.mkdir(arg(0))
+        return
+
+    mcp = Mcp(http, options.mcp, options.token)
+    if command == "tools":
+        for tool in mcp.send("tools/list", {}).get("tools", []):
+            print(f"{tool['name']}: {tool.get('description', '').splitlines()[0] if tool.get('description') else ''}")
+    elif command == "commands":
+        arguments = {"filter": arg(0, "")} if args else {}
+        print_result(mcp.call("command_list", arguments))
+    elif command == "call":
+        print_result(mcp.call(arg(0), json_arg(arg(1, ""))))
+    elif command == "run":
+        print_result(mcp.call("command_run", {"id": arg(0), "params": json_arg(arg(1, ""))}))
+    elif command == "preview":
+        result = mcp.call("doc_render_preview", {})
+        images = [item for item in result.get("content", []) if item.get("type") == "image"]
+        if not images:
+            fail("no image in the reply: " + content_text(result))
+        with open(arg(0), "wb") as handle:
+            handle.write(base64.b64decode(images[0]["data"]))
+        print(f"wrote {arg(0)}")
+    else:
+        fail(f"unknown command {command!r}; see --help")
+
+
+if __name__ == "__main__":
+    main()
