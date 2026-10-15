@@ -1,10 +1,10 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '0.9.0:1',
+  version: '0.9.0:2',
   releaseNotes: {
     en_US:
-      'Require authentication inside the package, ship web fonts, create inbox/out directories and strengthen runtime checks.',
+      'Require authentication inside the package, ship web fonts, create inbox/out directories, strengthen runtime checks and fix MCP nginx startup.',
     es_ES:
       'Requiere autenticación dentro del paquete, incluye fuentes web, crea los directorios inbox/out y mejora las comprobaciones.',
     de_DE:
