@@ -1,18 +1,18 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '0.9.0:0',
+  version: '0.9.0:1',
   releaseNotes: {
     en_US:
-      'First StartOS package: browser editor, file exchange and MCP endpoint for AI agents.',
+      'Require authentication inside the package, ship web fonts, create inbox/out directories and strengthen runtime checks.',
     es_ES:
-      'Primer paquete para StartOS: editor en el navegador, intercambio de archivos y punto de acceso MCP para agentes de IA.',
+      'Requiere autenticación dentro del paquete, incluye fuentes web, crea los directorios inbox/out y mejora las comprobaciones.',
     de_DE:
-      'Erstes StartOS-Paket: Browser-Editor, Dateiaustausch und MCP-Endpunkt für KI-Agenten.',
+      'Erfordert Authentifizierung im Paket, liefert Web-Schriften, erstellt inbox/out und verbessert Laufzeitprüfungen.',
     pl_PL:
-      'Pierwszy pakiet StartOS: edytor w przeglądarce, wymiana plików i punkt końcowy MCP dla agentów AI.',
+      'Wymaga uwierzytelniania w pakiecie, zawiera fonty webowe, tworzy inbox/out i wzmacnia kontrole działania.',
     fr_FR:
-      "Premier paquet StartOS : éditeur dans le navigateur, échange de fichiers et point d'accès MCP pour les agents IA.",
+      "Impose l'authentification dans le paquet, fournit les polices web, crée inbox/out et renforce les contrôles d'exécution.",
   },
   migrations: {
     up: async ({ effects }) => {},

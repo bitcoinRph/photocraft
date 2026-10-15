@@ -9,6 +9,18 @@
 ARG RUST_VERSION=1.99
 ARG NGINX_VERSION=1.28-alpine
 
+FROM alpine:3.22 AS craft-fonts
+ARG CRAFT_FONTS_COMMIT=3d9ab3a132ed0eff457e424226a435a901da30d3
+ARG CRAFT_FONTS_SHA256=bb8c4d2c32148760d2d47d77e8b222bc2b22fda1e85fcd72290fe7bfbb4689ee
+RUN apk add --no-cache ca-certificates curl tar \
+    && curl -fsSL --retry 3 -A Photocraft-dev \
+       "https://github.com/storytold/craft-fonts/archive/${CRAFT_FONTS_COMMIT}.tar.gz" \
+       -o /tmp/craft-fonts.tar.gz \
+    && echo "${CRAFT_FONTS_SHA256}  /tmp/craft-fonts.tar.gz" | sha256sum -c - \
+    && mkdir -p /fonts /tmp/craft-fonts \
+    && tar -xzf /tmp/craft-fonts.tar.gz --strip-components=1 -C /tmp/craft-fonts \
+    && cp -a /tmp/craft-fonts/fonts/. /fonts/
+
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 ARG TRUNK_VERSION=0.21.14
 RUN apt-get update \
@@ -46,11 +58,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && gzip -9 -k /src/dist/web/*.wasm /src/dist/web/*.js /src/dist/web/index.html
 
 FROM nginx:${NGINX_VERSION} AS runtime
+RUN apk add --no-cache curl
 COPY deploy/startos/nginx.conf /etc/nginx/nginx.conf
 COPY --from=builder /src/dist/web/ /usr/share/nginx/html/
+COPY --from=craft-fonts /fonts/ /usr/share/nginx/html/fonts/
+COPY deploy/startos/icon.png /usr/share/nginx/html/favicon.png
 COPY LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md /usr/share/nginx/html/
 COPY assets/fonts/OFL-*.txt assets/icons/LICENSE-*.txt assets/dict/LICENSE-*.txt \
     crates/ui-egui/src/i18n/LICENSE-translations.txt /usr/share/nginx/html/licenses/
+COPY --chmod=755 deploy/startos/web-health /usr/local/bin/photocraft-web-health
 # The `nginx` user is uid 101, the uid the `agent` image runs photocraft-cli
 # as, so both can write the workspace volume.
 USER nginx

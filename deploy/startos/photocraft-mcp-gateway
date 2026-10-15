@@ -1,16 +1,90 @@
-#!/bin/sh
-# Serve PhotoCraft's stdio MCP server over Streamable HTTP inside the container.
-# StartOS gates the port with a bearer token at its reverse proxy
-# (startos/interfaces.ts), so the proxy binds every address and checks nothing.
-#
-# mcp-proxy starts one photocraft-cli process and keeps it for its whole life,
-# so the engine session (open documents, history) survives across tool calls
-# and across client sessions. All agents share that one session, like one
-# desktop app: an agent works on the documents it opened, selected by index.
-set -eu
-exec mcp-proxy \
-  --host 0.0.0.0 \
-  --port 8082 \
-  -- photocraft-cli mcp \
-  --automation-read-root /data/workspace \
-  --automation-write-root /data/workspace
+#!/usr/bin/env python3
+"""Run loopback-only mcp-proxy behind an authenticated nginx listener."""
+
+from __future__ import annotations
+
+import os
+import pathlib
+import re
+import signal
+import subprocess
+import sys
+import time
+
+TOKEN_PATH = pathlib.Path("/etc/photocraft/mcp-token")
+TEMPLATE_PATH = pathlib.Path("/etc/photocraft/mcp-nginx.conf")
+CONFIG_PATH = pathlib.Path("/tmp/photocraft-mcp-nginx.conf")
+
+
+def load_token() -> str:
+    token = TOKEN_PATH.read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{64}", token):
+        raise ValueError("MCP token is invalid")
+    return token
+
+
+def stop(processes: list[subprocess.Popen[bytes]]) -> None:
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+    deadline = time.monotonic() + 10
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+
+def main() -> int:
+    token = load_token()
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    CONFIG_PATH.write_text(template.replace("__MCP_TOKEN__", token), encoding="utf-8")
+    os.chmod(CONFIG_PATH, 0o600)
+
+    proxy = subprocess.Popen(
+        [
+            "mcp-proxy",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8083",
+            "--",
+            "photocraft-cli",
+            "mcp",
+            "--automation-read-root",
+            "/data/workspace",
+            "--automation-write-root",
+            "/data/workspace",
+        ]
+    )
+    nginx = subprocess.Popen(
+        ["nginx", "-c", str(CONFIG_PATH), "-g", "daemon off;"]
+    )
+    processes = [proxy, nginx]
+
+    def handle_signal(signum: int, _frame: object) -> None:
+        stop(processes)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    try:
+        while True:
+            for process in processes:
+                code = process.poll()
+                if code is not None:
+                    stop(processes)
+                    return code if code != 0 else 1
+            time.sleep(0.25)
+    finally:
+        stop(processes)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as error:
+        print(f"photocraft-mcp-gateway: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

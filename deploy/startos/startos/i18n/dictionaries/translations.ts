@@ -22,6 +22,7 @@ export default {
     17: 'Nombre de usuario del intercambio de archivos',
     18: 'Contraseña del intercambio de archivos',
     19: 'Genera el token MCP y la contraseña del intercambio de archivos antes de que los agentes puedan conectarse',
+    20: 'Usa solamente letras inglesas y dígitos.',
   },
   de_DE: {
     0: 'Starte PhotoCraft!',
@@ -44,6 +45,7 @@ export default {
     17: 'Benutzername für den Dateiaustausch',
     18: 'Passwort für den Dateiaustausch',
     19: 'Erzeuge das MCP-Token und das Passwort für den Dateiaustausch, bevor Agenten sich verbinden können',
+    20: 'Verwende nur englische Buchstaben und Ziffern.',
   },
   pl_PL: {
     0: 'Uruchamianie PhotoCraft!',
@@ -66,6 +68,7 @@ export default {
     17: 'Nazwa użytkownika wymiany plików',
     18: 'Hasło wymiany plików',
     19: 'Wygeneruj token MCP i hasło do wymiany plików, zanim agenci będą mogli się połączyć',
+    20: 'Używaj tylko angielskich liter i cyfr.',
   },
   fr_FR: {
     0: 'Démarrage de PhotoCraft !',
@@ -88,5 +91,6 @@ export default {
     17: "Nom d'utilisateur de l'échange de fichiers",
     18: "Mot de passe de l'échange de fichiers",
     19: "Générez le jeton MCP et le mot de passe de l'échange de fichiers avant que les agents puissent se connecter",
+    20: 'Utilisez uniquement des lettres anglaises et des chiffres.',
   },
 } satisfies Record<string, LangDict>
