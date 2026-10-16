@@ -28,6 +28,7 @@ const dict = {
 
   // init/watchCredentials.ts
   'Generate the MCP token and the file exchange password before agents can connect': 19,
+  'Use only English letters and digits.': 20,
 } as const
 
 /**

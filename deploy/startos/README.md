@@ -37,7 +37,7 @@ Both images are built from this repository's source by the package's own Dockerf
 | Image   | Dockerfile               | Contents                                                                                     |
 | ------- | ------------------------ | -------------------------------------------------------------------------------------------- |
 | `web`   | `web.Dockerfile`         | The WebAssembly editor built with Trunk, served by nginx (upstream's recipe, package config) |
-| `agent` | `agent.Dockerfile`       | `photocraft-cli` built with `--features heif`, and `mcp-proxy` on Python                     |
+| `agent` | `agent.Dockerfile`       | `photocraft-cli`, mcp-proxy on loopback, and nginx bearer authentication on the exposed port |
 
 Architectures: x86_64, aarch64.
 
@@ -46,8 +46,8 @@ Subcontainers and daemons:
 | Subcontainer | Image   | Daemon      | Runs as         | Process                                                                    |
 | ------------ | ------- | ----------- | --------------- | -------------------------------------------------------------------------- |
 | `web-sub`    | `web`   | `web`       | `nginx` (101)   | `nginx -g 'daemon off;'` on ports 8080 (editor) and 8081 (file exchange)   |
-| `agent-sub`  | `agent` | `mcp`       | `photocraft` (101) | `photocraft-mcp-gateway`: `mcp-proxy --host 0.0.0.0 --port 8082 -- photocraft-cli mcp --automation-read-root /data/workspace --automation-write-root /data/workspace` |
-| `agent-sub`  | `agent` | `workspace` (oneshot) | `root` | `install -d -o photocraft -g photocraft /data/workspace /data/nginx-tmp` before every start |
+| `agent-sub`  | `agent` | `mcp`       | `photocraft` (101) | `photocraft-mcp-gateway`: mcp-proxy on loopback port 8083 behind authenticated nginx on port 8082 |
+| `agent-sub`  | `agent` | `workspace` (oneshot) | `root` | creates `/data/workspace`, `/data/workspace/inbox`, `/data/workspace/out` and `/data/nginx-tmp` before every start |
 
 mcp-proxy starts one `photocraft-cli mcp` process and keeps it for its lifetime. Every MCP client shares that one engine session.
 
@@ -57,14 +57,14 @@ The workspace is the only data. Both subcontainers mount the same volume.
 
 | Volume    | Mount point | Contents                                                                                  |
 | --------- | ----------- | ----------------------------------------------------------------------------------------- |
-| `main`    | `/data`     | `workspace/` (the files agents read and write, served by the file exchange), `nginx-tmp/` (upload staging, same filesystem so a PUT can be renamed into place) |
+| `main`    | `/data`     | `workspace/` with ready-to-use `inbox/` and `out/`, plus `nginx-tmp/` upload staging |
 | `startos` | not mounted | `store.json`                                                                              |
 
 The editor keeps no data on the server: it opens and saves files on the user's computer, and keeps preferences in the browser's local storage.
 
 ## File Models
 
-One model, `startos/fileModels/store.json.ts`, maps `store.json` on the `startos` volume. It holds the two credentials the OS reverse proxy checks: `mcpToken` and `filesPassword`. The **Set Agent Credentials** action is its only writer; nothing re-asserts the values on start. The proxy needs them in the clear, which is why the volume is mounted by no container.
+One model, `startos/fileModels/store.json.ts`, maps `store.json` on the `startos` volume. It holds `mcpToken` and `filesPassword`. The **Set Agent Credentials** action is its only writer. On start, `main.ts` writes only the file password hash into the web container and only the MCP token into the agent container's ephemeral root filesystem; the `startos` volume remains unmounted.
 
 The package writes no upstream configuration file. nginx reads the `nginx.conf` baked into the `web` image, and `photocraft-cli` takes its two root directories from the command line.
 
@@ -74,7 +74,7 @@ None.
 
 ## Network Access and Interfaces
 
-One host, `main`, carries three bindings. The OS reverse proxy terminates TLS for all of them and checks credentials on two.
+One host, `main`, carries three bindings. The OS reverse proxy terminates TLS and checks credentials on the file and MCP interfaces. Their raw listeners repeat the same checks so another installed package cannot bypass the public proxy.
 
 | Interface id | Type  | Port | Gate at the proxy                              | Serves                                                                                         |
 | ------------ | ----- | ---- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
@@ -86,11 +86,11 @@ One host, `main`, carries three bindings. The OS reverse proxy terminates TLS fo
 
 ## Installation and First-Run Flow
 
-Install raises the critical task described under [Tasks](#tasks); the service does not start until **Set Agent Credentials** has run. The action stores both credentials, `setupInterfaces` re-runs and binds the two gated ports, and the first start creates `/data/workspace`. No upstream setup wizard exists.
+Install raises the critical task described under [Tasks](#tasks); the service does not start until **Set Agent Credentials** has run. The action stores both credentials, `setupInterfaces` binds the gated ports, and the first start creates `/data/workspace/inbox` and `/data/workspace/out`. No upstream setup wizard exists.
 
 ## Actions
 
-**Set Agent Credentials** (`set-agent-credentials`): run it on install and whenever a token or password must be rotated. It generates a 64-character bearer token and a 32-character password, writes both to `store.json`, and returns the token, the user name `photocraft` and the password. It takes well under a second and does not restart the daemons; the proxy picks up the new values when `setupInterfaces` re-runs. A second run replaces both values, so every agent must be reconfigured afterwards. No action is hidden.
+**Set Agent Credentials** (`set-agent-credentials`): run it on install and whenever credentials must be rotated. Its masked input form generates a 64-character bearer token and a 32-character password; copy them before submitting. The action writes them to `store.json` but does not return them in its result, because StartOS can record action responses in package logs. A credential change restarts the web and MCP listeners with new in-container gates. Every agent must then be reconfigured. No action is hidden.
 
 ## Tasks
 
@@ -98,14 +98,14 @@ One task. `startos/init/watchCredentials.ts` raises a **critical** task pointing
 
 ## Health Checks
 
-Both checks are port probes with the default grace period.
+Both checks exercise application behavior, including rejection of anonymous raw-port requests.
 
 | Check                         | Probes                | A failure means                                                                                                                                             |
 | ----------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `web` daemon: Editor          | port 8080 listening   | nginx did not start. Read the daemon log: a config error or a permission error on `/data/nginx-tmp` is printed there.                                        |
-| `mcp` daemon: MCP Endpoint    | port 8082 listening   | mcp-proxy did not start or `photocraft-cli` exited at launch. The log shows the Python traceback or the CLI's error; a wrong root directory is the usual cause. |
+| `web` daemon: Editor and File Exchange | editor `/healthz` returns `ok` and anonymous raw file access is rejected | nginx, the editor, or the file-auth gate is not ready. |
+| `mcp` daemon: MCP Endpoint    | anonymous `/status` is rejected and authenticated `/status` reports the default backend configured | nginx, mcp-proxy, the token gate, or `photocraft-cli` is not ready. |
 
-The MCP endpoint can listen while the engine process has died later; mcp-proxy then answers tool calls with an error. Restart the service.
+The gateway supervisor exits if either nginx or mcp-proxy exits, so StartOS can report and restart the failed daemon.
 
 ## Backups and Restore
 
@@ -145,6 +145,6 @@ actions:
 tasks:
   - { action: set-agent-credentials, severity: critical }
 health_checks:
-  - web (Editor, port 8080)
-  - mcp (MCP Endpoint, port 8082)
+  - web (editor response plus anonymous-file rejection)
+  - mcp (authenticated backend status plus anonymous-request rejection)
 ```

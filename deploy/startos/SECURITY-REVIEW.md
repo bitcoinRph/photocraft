@@ -26,7 +26,7 @@ Verdict: **safe with caveats.** The automation surface this package exposes is d
 | 3 | No `cargo-audit` or `cargo-deny` job upstream. | low | Not added here either; the lockfile is upstream's. Run `cargo audit` in the fork before a bump. |
 | 4 | The upstream `Dockerfile` (and `web.Dockerfile` here) downloads Trunk from GitHub releases and checks it against the `.sha256` from the same release (trust on first use over TLS). | low | Kept as upstream ships it. The pin is a version, the download is checksummed. |
 | 5 | The automation command authorizer is a denylist. A future engine command that takes a path under a new parameter name could slip through. | low | Mitigated by the container: the `agent` subcontainer sees only the `main` volume at `/data`, and runs as an unprivileged user. |
-| 6 | The MCP transport has no per-tool capability scopes: an authenticated client gets the whole tool surface. | info | The bearer token at the StartOS proxy is the only gate. Rotate it with **Set Agent Credentials** when an agent is retired. |
+| 6 | The MCP transport has no per-tool capability scopes: an authenticated client gets the whole tool surface. | info | The bearer token is checked both inside the package and at the StartOS proxy. Rotate it with **Set Agent Credentials** when an agent is retired. |
 | 7 | Upstream advises against proxying the control protocol off-host. | info | The package does not proxy `serve`. It exposes MCP through mcp-proxy, and StartOS adds TLS and the bearer check in front of it. |
 
 ## What the package adds
@@ -34,7 +34,7 @@ Verdict: **safe with caveats.** The automation surface this package exposes is d
 | Component | Pin | Why it is acceptable |
 | --- | --- | --- |
 | nginx (official `nginx:<version>-alpine` image, nginx.org build) | tag in `web.Dockerfile` | Upstream's own hosting recipe. The file exchange uses the core `ngx_http_dav_module` (PUT, DELETE, MKCOL, COPY, MOVE). nginx normalizes `..` before the filesystem is touched (a `GET /../../etc/passwd` returns 400 in a local test). |
-| mcp-proxy and its 32 dependencies | `gateway/requirements.txt`, every package pinned with sha256 hashes, installed with `--require-hashes --no-deps` | One process, started from a two-line shell script, that forwards MCP between HTTP and the CLI's stdio. It checks nothing itself; the OS proxy does. |
+| mcp-proxy and its 32 dependencies | `gateway/requirements.txt`, every package pinned with sha256 hashes, installed with `--require-hashes --no-deps` | It binds loopback only. nginx checks the bearer token on the exposed port before forwarding to it; the StartOS proxy repeats the check. |
 | Python base image | `python:<version>-slim-bookworm` | Official image. |
 | Rust builder | `rust:<version>-slim-bookworm` | Official image, same as upstream's Dockerfile. |
 

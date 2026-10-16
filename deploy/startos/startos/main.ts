@@ -1,29 +1,51 @@
+import { createHash, randomBytes } from 'node:crypto'
+import { storeJson } from './fileModels/store.json'
 import { i18n } from './i18n'
 import { sdk } from './sdk'
 import { mcpPort, uiPort, workspaceDir } from './utils'
 
+const lockedMcpToken = randomBytes(32).toString('hex')
+const lockedFilesPassword = randomBytes(32).toString('hex')
+const filesHealthPassword = randomBytes(32).toString('hex')
+
+const digest = (value: string) =>
+  createHash('sha256').update(value).digest('hex')
+
+const htpasswdSsha = (password: string) => {
+  const salt = randomBytes(16)
+  const hash = createHash('sha1').update(password).update(salt).digest()
+  return `{SSHA}${Buffer.concat([hash, salt]).toString('base64')}`
+}
+
 export const main = sdk.setupMain(async ({ effects }) => {
   console.info(i18n('Starting PhotoCraft!'))
 
-  // Both containers see the `main` volume at /data. The editor's static site
-  // needs no volume; nginx also serves the workspace as the file exchange.
-  const mounts = sdk.Mounts.of().mountVolume({
-    volumeId: 'main',
-    subpath: null,
-    mountpoint: '/data',
-    readonly: false,
-  })
-  const agentSub = sdk.SubContainer.of(
-    effects,
-    { imageId: 'agent' },
-    mounts,
-    'agent-sub',
-  )
+  return sdk.Daemons.dynamic(effects, async ({ effects }) => {
+    const store = await storeJson.read().const(effects)
+    const mcpToken = store?.mcpToken || lockedMcpToken
+    const filesPassword = store?.filesPassword || lockedFilesPassword
+    const credentialDigest = digest(`${mcpToken}\0${filesPassword}`)
 
-  return (
-    sdk.Daemons.of(effects)
-      // The workspace is created by root once per start, owned by the one
-      // unprivileged user both images run as (see the Dockerfiles).
+    const mounts = sdk.Mounts.of().mountVolume({
+      volumeId: 'main',
+      subpath: null,
+      mountpoint: '/data',
+      readonly: false,
+    })
+    const agentSub = sdk.SubContainer.of(
+      effects,
+      { imageId: 'agent' },
+      mounts,
+      'agent-sub',
+    )
+    const webSub = sdk.SubContainer.of(
+      effects,
+      { imageId: 'web' },
+      mounts,
+      'web-sub',
+    )
+
+    return sdk.Daemons.of(effects)
       .addOneshot('workspace', {
         subcontainer: agentSub,
         exec: {
@@ -35,6 +57,8 @@ export const main = sdk.setupMain(async ({ effects }) => {
             '-g',
             'photocraft',
             workspaceDir,
+            `${workspaceDir}/inbox`,
+            `${workspaceDir}/out`,
             '/data/nginx-tmp',
           ],
           user: 'root',
@@ -42,35 +66,75 @@ export const main = sdk.setupMain(async ({ effects }) => {
         requires: [],
       })
       .addDaemon('web', {
-        subcontainer: sdk.SubContainer.of(
-          effects,
-          { imageId: 'web' },
-          mounts,
-          'web-sub',
-        ),
-        exec: { command: sdk.useEntrypoint(), user: 'nginx' },
+        subcontainer: webSub,
+        exec: {
+          fn: async (subcontainer) => {
+            await subcontainer.writeFile(
+              '/etc/nginx/.htpasswd',
+              `photocraft:${htpasswdSsha(filesPassword)}\nphotocraft-health:${htpasswdSsha(filesHealthPassword)}\n`,
+              { mode: 0o600 },
+            )
+            await subcontainer.writeFile(
+              '/etc/photocraft/files-health-password',
+              `${filesHealthPassword}\n`,
+              { mode: 0o600 },
+            )
+            await subcontainer.execFail(
+              [
+                'chown',
+                'nginx:nginx',
+                '/etc/nginx/.htpasswd',
+                '/etc/photocraft/files-health-password',
+              ],
+              { user: 'root' },
+            )
+            return { command: sdk.useEntrypoint(), user: 'nginx' }
+          },
+        },
         ready: {
           display: i18n('Editor'),
           fn: () =>
-            sdk.healthCheck.checkPortListening(effects, uiPort, {
-              successMessage: i18n('The editor is ready'),
+            sdk.healthCheck.runHealthScript(['photocraft-web-health'], webSub, {
               errorMessage: i18n('The editor is not ready'),
+              message: () => i18n('The editor is ready'),
             }),
         },
         requires: ['workspace'],
+        uses: { credentialDigest },
       })
       .addDaemon('mcp', {
         subcontainer: agentSub,
-        exec: { command: ['photocraft-mcp-gateway'], user: 'photocraft' },
+        exec: {
+          fn: async (subcontainer) => {
+            await subcontainer.writeFile(
+              '/etc/photocraft/mcp-token',
+              `${mcpToken}\n`,
+              { mode: 0o600 },
+            )
+            await subcontainer.execFail(
+              ['chown', 'photocraft:photocraft', '/etc/photocraft/mcp-token'],
+              { user: 'root' },
+            )
+            return {
+              command: ['photocraft-mcp-gateway'],
+              user: 'photocraft',
+            }
+          },
+        },
         ready: {
           display: i18n('MCP Endpoint'),
           fn: () =>
-            sdk.healthCheck.checkPortListening(effects, mcpPort, {
-              successMessage: i18n('The MCP endpoint is ready'),
-              errorMessage: i18n('The MCP endpoint is not ready'),
-            }),
+            sdk.healthCheck.runHealthScript(
+              ['photocraft-mcp-health'],
+              agentSub,
+              {
+                errorMessage: i18n('The MCP endpoint is not ready'),
+                message: () => i18n('The MCP endpoint is ready'),
+              },
+            ),
         },
         requires: ['workspace'],
+        uses: { credentialDigest, port: mcpPort, uiPort },
       })
-  )
+  })
 })

@@ -16,7 +16,7 @@
 
 ## Getting set up
 
-1. Open the **Actions** tab and run **Set Agent Credentials**. Copy the MCP bearer token and the file exchange password. The action shows them once. Run it again to get new ones.
+1. Open **Actions › Set Agent Credentials**. The masked form generates a bearer token and file-exchange password. Copy both values before submitting the form; the result page deliberately does not repeat them because StartOS can record action responses in package logs. Run the action again to rotate both credentials.
 2. Start the service.
 3. Open the **Interfaces** tab. Copy the **File Exchange** address and the **MCP Endpoint** address.
 4. If you connect over LAN, trust your server's root certificate on each computer that runs an agent. StartOS shows how on its **System › Root CA** page.
@@ -37,7 +37,7 @@ To upload a file, send an HTTP PUT with the same credentials. For example:
 curl -u photocraft:<password> -T photo.jpg https://<file-exchange-address>/inbox/photo.jpg
 ```
 
-`tools/photocraft-remote` in the package repository wraps these requests: `ls`, `put`, `get`, `rm`, `mkdir`.
+The `inbox/` and `out/` directories are created automatically. `tools/photocraft-remote` in the package repository wraps these requests: `ls`, `put`, `get`, `rm`, `mkdir`.
 
 ### Connecting an agent
 
@@ -46,7 +46,7 @@ The MCP Endpoint speaks MCP over Streamable HTTP. Every request must carry the h
 Claude Code:
 
 ```sh
-claude mcp add --transport http photocraft https://<mcp-endpoint-address>/mcp \
+claude mcp add --transport http photocraft https://<mcp-endpoint-address> \
   --header "Authorization: Bearer <token>"
 ```
 
@@ -54,7 +54,7 @@ Codex (`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.photocraft]
-url = "https://<mcp-endpoint-address>/mcp"
+url = "https://<mcp-endpoint-address>"
 bearer_token_env_var = "PHOTOCRAFT_MCP_TOKEN"
 ```
 
@@ -63,7 +63,7 @@ Hermes Agent (`~/.hermes/config.yaml`):
 ```yaml
 mcp_servers:
   photocraft:
-    url: "https://<mcp-endpoint-address>/mcp"
+    url: "https://<mcp-endpoint-address>"
     headers:
       Authorization: "Bearer ${PHOTOCRAFT_MCP_TOKEN}"
 ```

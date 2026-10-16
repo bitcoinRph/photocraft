@@ -1,10 +1,52 @@
-import { utils } from '@start9labs/start-sdk'
 import { storeJson } from '../fileModels/store.json'
 import { i18n } from '../i18n'
 import { sdk } from '../sdk'
-import { filesUsername } from '../utils'
 
-export const setAgentCredentials = sdk.Action.withoutInput(
+const mcpTokenGenerator = {
+  charset: 'a-z,A-Z,0-9' as const,
+  len: 64,
+}
+const filesPasswordGenerator = {
+  charset: 'a-z,A-Z,0-9' as const,
+  len: 32,
+}
+
+const inputSpec = sdk.InputSpec.of({
+  mcpToken: sdk.Value.text({
+    name: i18n('MCP bearer token'),
+    description: null,
+    required: true,
+    default: mcpTokenGenerator,
+    generate: mcpTokenGenerator,
+    masked: true,
+    minLength: 64,
+    maxLength: 64,
+    patterns: [
+      {
+        regex: '^[A-Za-z0-9]+$',
+        description: i18n('Use only English letters and digits.'),
+      },
+    ],
+  }),
+  filesPassword: sdk.Value.text({
+    name: i18n('File exchange password'),
+    description: null,
+    required: true,
+    default: filesPasswordGenerator,
+    generate: filesPasswordGenerator,
+    masked: true,
+    minLength: 32,
+    maxLength: 32,
+    patterns: [
+      {
+        regex: '^[A-Za-z0-9]+$',
+        description: i18n('Use only English letters and digits.'),
+      },
+    ],
+  }),
+})
+
+export const setAgentCredentials = sdk.Action.withInput(
   'set-agent-credentials',
 
   async ({ effects }) => ({
@@ -22,58 +64,14 @@ export const setAgentCredentials = sdk.Action.withoutInput(
     visibility: 'enabled',
   }),
 
-  async ({ effects }) => {
-    const mcpToken = utils.getDefaultString({
-      charset: 'a-z,A-Z,0-9',
-      len: 64,
-    })
-    const filesPassword = utils.getDefaultString({
-      charset: 'a-z,A-Z,0-9',
-      len: 32,
-    })
-    await storeJson.merge(effects, { mcpToken, filesPassword })
+  inputSpec,
 
-    return {
-      version: '1',
-      title: i18n('Agent Credentials'),
-      message: i18n(
-        'Give the MCP token to each agent as `Authorization: Bearer <token>`. Use the user name and password for the file exchange. The addresses are on the Interfaces tab.',
-      ),
-      result: {
-        type: 'group',
-        value: [
-          {
-            type: 'single',
-            name: i18n('MCP bearer token'),
-            description: null,
-            value: mcpToken,
-            masked: true,
-            copyable: true,
-            qr: false,
-            launchable: false,
-          },
-          {
-            type: 'single',
-            name: i18n('File exchange user name'),
-            description: null,
-            value: filesUsername,
-            masked: false,
-            copyable: true,
-            qr: false,
-            launchable: false,
-          },
-          {
-            type: 'single',
-            name: i18n('File exchange password'),
-            description: null,
-            value: filesPassword,
-            masked: true,
-            copyable: true,
-            qr: false,
-            launchable: false,
-          },
-        ],
-      },
-    }
+  async () => ({}),
+
+  async ({ effects, input }) => {
+    await storeJson.merge(effects, {
+      mcpToken: input.mcpToken,
+      filesPassword: input.filesPassword,
+    })
   },
 )

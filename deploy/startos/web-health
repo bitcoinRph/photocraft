@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+[ "$(curl -fsS http://127.0.0.1:8080/healthz)" = "ok" ]
+
+anonymous_status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/)"
+[ "$anonymous_status" = "401" ] || {
+    echo "anonymous file exchange returned HTTP $anonymous_status, expected 401" >&2
+    exit 1
+}
+
+health_password="$(cat /etc/photocraft/files-health-password)"
+authenticated_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -u "photocraft-health:$health_password" http://127.0.0.1:8081/.json/)"
+[ "$authenticated_status" = "200" ] || {
+    echo "authenticated file exchange returned HTTP $authenticated_status, expected 200" >&2
+    exit 1
+}
